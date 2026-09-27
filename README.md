@@ -12,26 +12,17 @@ Laravel Cashier-style customer and subscription billing for the [BlueSnap Paymen
 
 The package uses the framework-agnostic [`andriichuk/bluesnap-php-sdk`](https://github.com/andriichuk/bluesnap-php-sdk) for API communication.
 
-## Installation during early development
+## Installation
 
-Until both packages are available through Packagist, add their Git repositories to your application's `composer.json`:
-
-```json
-{
-    "repositories": [
-        {"type": "vcs", "url": "https://github.com/andriichuk/cashier-bluesnap"},
-        {"type": "vcs", "url": "https://github.com/andriichuk/bluesnap-php-sdk"}
-    ]
-}
-```
-
-Then install the package:
+The package is available on [Packagist](https://packagist.org/packages/andriichuk/cashier-bluesnap). While the package is in early development and has no tagged release, install the `main` development branch explicitly:
 
 ```bash
 composer require andriichuk/cashier-bluesnap:dev-main
 php artisan vendor:publish --tag=cashier-bluesnap-migrations
 php artisan migrate
 ```
+
+The framework-agnostic BlueSnap SDK dependency is also resolved automatically from Packagist; no custom Composer repository entries are required.
 
 Add the credentials to `.env`:
 
