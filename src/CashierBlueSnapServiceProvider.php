@@ -7,6 +7,9 @@ namespace Andriichuk\CashierBlueSnap;
 use Andriichuk\BlueSnap\BlueSnapClient;
 use Andriichuk\BlueSnap\Configuration;
 use Andriichuk\BlueSnap\Environment;
+use Andriichuk\CashierBlueSnap\Console\ConfigureWebhookCommand;
+use Andriichuk\CashierBlueSnap\Contracts\WebhookSignatureVerifier;
+use Andriichuk\CashierBlueSnap\Webhooks\HmacWebhookSignatureVerifier;
 use GuzzleHttp\Client;
 use GuzzleHttp\Psr7\HttpFactory;
 use Illuminate\Contracts\Foundation\Application;
@@ -51,6 +54,8 @@ final class CashierBlueSnapServiceProvider extends ServiceProvider
             );
         });
 
+        $this->app->singleton(WebhookSignatureVerifier::class, HmacWebhookSignatureVerifier::class);
+
         /** @var array<string, mixed> $models */
         $models = config('cashier-bluesnap.models', []);
 
@@ -65,13 +70,21 @@ final class CashierBlueSnapServiceProvider extends ServiceProvider
         if (is_string($models['transaction'] ?? null) && is_a($models['transaction'], Transaction::class, true)) {
             Cashier::useTransactionModel($models['transaction']);
         }
+
+        if (is_string($models['webhook_event'] ?? null) && is_a($models['webhook_event'], WebhookEvent::class, true)) {
+            Cashier::useWebhookEventModel($models['webhook_event']);
+        }
     }
 
     public function boot(): void
     {
+        $this->loadRoutesFrom(__DIR__.'/../routes/webhooks.php');
+
         if (! $this->app->runningInConsole()) {
             return;
         }
+
+        $this->commands([ConfigureWebhookCommand::class]);
 
         $this->publishes([
             __DIR__.'/../config/cashier-bluesnap.php' => $this->app->configPath('cashier-bluesnap.php'),

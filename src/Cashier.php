@@ -19,6 +19,9 @@ final class Cashier
     /** @var class-string<Transaction> */
     public static string $transactionModel = Transaction::class;
 
+    /** @var class-string<WebhookEvent> */
+    public static string $webhookEventModel = WebhookEvent::class;
+
     public static function client(): BlueSnapClient
     {
         return Container::getInstance()->make(BlueSnapClient::class);
@@ -40,6 +43,12 @@ final class Cashier
     public static function useTransactionModel(string $model): void
     {
         self::$transactionModel = $model;
+    }
+
+    /** @param class-string<WebhookEvent> $model */
+    public static function useWebhookEventModel(string $model): void
+    {
+        self::$webhookEventModel = $model;
     }
 
     /**

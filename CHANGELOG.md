@@ -13,3 +13,7 @@ All notable changes will be documented in this file.
 - Add typed money, payer, and payment-source value objects and payload validation.
 - Add transaction boundaries and row locks around local customer and subscription changes.
 - Add declined-payment, retryable-operation, duplicate-subscription, and invalid-payload exceptions.
+- Add authenticated, replay-resistant, idempotent BlueSnap webhook ingestion.
+- Add durable webhook event storage, queued processing, lifecycle events, and retry diagnostics.
+- Synchronize core subscription and transaction state from webhook deliveries.
+- Add the `bluesnap:webhook` configuration command.

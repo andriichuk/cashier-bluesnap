@@ -31,9 +31,14 @@
         "andriichuk/bluesnap-php-sdk": "dev-main",
         "ext-json": "*",
         "guzzlehttp/guzzle": "^7.10",
+        "illuminate/bus": "^13.0",
         "illuminate/config": "^13.0",
+        "illuminate/console": "^13.0",
         "illuminate/contracts": "^13.0",
         "illuminate/database": "^13.0",
+        "illuminate/http": "^13.0",
+        "illuminate/queue": "^13.0",
+        "illuminate/routing": "^13.0",
         "illuminate/support": "^13.0"
     },
     "require-dev": {

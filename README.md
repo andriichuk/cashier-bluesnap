@@ -2,7 +2,7 @@
 
 Laravel Cashier-style customer and subscription billing for the [BlueSnap Payment API](https://developers.bluesnap.com/v8976-JSON/reference/bluesnap-payment-api-json).
 
-> This package is an early development release. Customer and subscription lifecycle operations are implemented; webhook ingestion and reconciliation are the next milestone. Do not treat local subscription state as authoritative in production until webhook synchronization is available.
+> This package is an early development release. Customer and subscription lifecycle operations plus durable webhook synchronization are implemented. Exercise normal production care while the public API is still stabilizing.
 
 ## Requirements
 
@@ -32,6 +32,13 @@ BLUESNAP_PASSWORD=
 BLUESNAP_ENVIRONMENT=sandbox
 BLUESNAP_API_VERSION=3.0
 BLUESNAP_CURRENCY=USD
+BLUESNAP_WEBHOOK_SECRET=
+```
+
+The webhook receiver is available at `/bluesnap/webhook` by default. Publish the configuration file to change its path, middleware, queue, or enabled BlueSnap event types:
+
+```bash
+php artisan vendor:publish --tag=cashier-bluesnap-config
 ```
 
 ## Make a model billable
@@ -130,6 +137,27 @@ $user->subscribed('default');
 $user->subscribed('default', planId: 2283849);
 ```
 
+## Webhooks
+
+Configure the public HTTPS endpoint through the API:
+
+```bash
+php artisan bluesnap:webhook https://billing.example.com/bluesnap/webhook
+php artisan bluesnap:webhook --show
+```
+
+Then open BlueSnap's **Settings > Webhook Settings**, enable **Security Header**, and copy the generated key into `BLUESNAP_WEBHOOK_SECRET`. BlueSnap does not expose that key through the webhook-configuration API.
+
+Incoming requests are authenticated with BlueSnap's HMAC-SHA256 security headers before parsing. The timestamp is limited to five minutes by default, the exact raw body is deduplicated in `bluesnap_webhook_events`, and processing runs through Laravel's queue. Set a real asynchronous queue driver in production and keep a worker running. A request is acknowledged only after it is durably recorded and successfully handed to the queue.
+
+The package synchronizes known subscriptions and transactions for charge, recurring, decline, refund, chargeback, cancellation, and contract-change events. Every accepted delivery remains queryable through `WebhookEvent`, including its status, attempts, payload, and failure details. Application listeners may subscribe to:
+
+- `WebhookReceived`
+- `WebhookHandled`
+- `WebhookFailed`
+
+Signature verification is enabled by default. `BLUESNAP_WEBHOOK_VERIFY_SIGNATURE=false` is intended only for tightly controlled local tests. Set `BLUESNAP_WEBHOOK_TIMESTAMP_TOLERANCE` to change the default 300-second replay window.
+
 ## Current scope
 
 Implemented now:
@@ -143,12 +171,13 @@ Implemented now:
 - Typed money, payer, and payment-source values with request validation
 - Atomic local persistence and serialized customer/subscription mutations
 - Explicit declined-payment and retryable-operation exceptions
+- Signed, replay-resistant, idempotent webhook ingestion with queued processing
+- Subscription lifecycle and transaction synchronization from core webhook events
+- Webhook configuration command and Laravel lifecycle events
 - Laravel 13 integration tests and maximum-level static analysis
 
 Planned next:
 
-- Signed, idempotent webhook ingestion and event dispatching
-- Charge and transaction synchronization
 - Periodic reconciliation commands
 - Hosted Payment Fields helpers and saved-card 3-D Secure orchestration
 - Cashier-style receipts/invoices assembled from BlueSnap charge data
