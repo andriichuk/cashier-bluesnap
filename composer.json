@@ -1,0 +1,83 @@
+{
+    "name": "andriichuk/cashier-bluesnap",
+    "description": "Laravel Cashier-style subscription billing for BlueSnap.",
+    "keywords": [
+        "bluesnap",
+        "cashier",
+        "laravel",
+        "payments",
+        "subscriptions"
+    ],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Serhii Andriichuk",
+            "email": "andriichuk29@gmail.com"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/andriichuk/cashier-bluesnap/issues",
+        "source": "https://github.com/andriichuk/cashier-bluesnap"
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/andriichuk/bluesnap-php-sdk"
+        }
+    ],
+    "require": {
+        "php": "^8.5",
+        "andriichuk/bluesnap-php-sdk": "dev-main",
+        "ext-json": "*",
+        "guzzlehttp/guzzle": "^7.10",
+        "illuminate/config": "^13.0",
+        "illuminate/contracts": "^13.0",
+        "illuminate/database": "^13.0",
+        "illuminate/support": "^13.0"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.0",
+        "orchestra/testbench": "^11.0",
+        "phpunit/phpunit": "^12.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Andriichuk\\CashierBlueSnap\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Andriichuk\\CashierBlueSnap\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "0.1.x-dev"
+        },
+        "laravel": {
+            "providers": [
+                "Andriichuk\\CashierBlueSnap\\CashierBlueSnapServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --debug --no-progress --memory-limit=1G",
+        "check": [
+            "@test",
+            "@analyse"
+        ]
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": false
+        },
+        "audit": {
+            "block-insecure": false
+        },
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
