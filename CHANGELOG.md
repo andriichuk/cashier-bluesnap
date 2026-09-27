@@ -9,3 +9,7 @@ All notable changes will be documented in this file.
 - Add the `Billable` trait and vaulted-shopper lifecycle operations.
 - Add subscription creation, synchronization, plan swaps, quantity changes, cancellation, renewal, and status helpers.
 - Add Laravel integration tests, static analysis, documentation, and CI.
+- Correct Hosted Payment Fields subscription requests to use top-level `pfToken`.
+- Add typed money, payer, and payment-source value objects and payload validation.
+- Add transaction boundaries and row locks around local customer and subscription changes.
+- Add declined-payment, retryable-operation, duplicate-subscription, and invalid-payload exceptions.

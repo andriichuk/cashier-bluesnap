@@ -44,4 +44,16 @@ final class CustomerTest extends TestCase
 
         $user->createAsBlueSnapCustomer();
     }
+
+    public function test_it_reads_the_vaulted_shopper_id_from_the_location_header(): void
+    {
+        $user = User::query()->create(['name' => 'Ada Lovelace', 'email' => 'ada@example.com']);
+        $this->http->queueJson([], headers: [
+            'Location' => 'https://sandbox.bluesnap.com/services/2/vaulted-shoppers/19574809',
+        ]);
+
+        $customer = $user->createAsBlueSnapCustomer();
+
+        self::assertSame('19574809', $customer->vaulted_shopper_id);
+    }
 }

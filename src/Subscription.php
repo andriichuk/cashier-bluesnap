@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Andriichuk\CashierBlueSnap;
 
+use Andriichuk\CashierBlueSnap\Exceptions\InvalidBillingPayload;
+use Andriichuk\CashierBlueSnap\Support\BlueSnapOperation;
+use Andriichuk\CashierBlueSnap\ValueObjects\Money;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Support\Carbon;
-use InvalidArgumentException;
 
 /**
  * @property int $id
@@ -114,11 +116,24 @@ class Subscription extends Model
         return $this->active() || $this->onTrial() || $this->onGracePeriod();
     }
 
+    public function recurringMoney(): ?Money
+    {
+        if ($this->recurring_amount === null || $this->currency === null) {
+            return null;
+        }
+
+        return Money::of($this->recurring_amount, $this->currency);
+    }
+
     public function refreshFromBlueSnap(): self
     {
-        $data = Cashier::client()->subscriptions()->retrieve($this->bluesnap_id)->json();
+        return $this->serialized(function (): self {
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->subscriptions()->retrieve($this->bluesnap_id),
+            );
 
-        return $this->syncFromBlueSnap($data);
+            return $this->persistBlueSnapState($response->json());
+        });
     }
 
     public function swap(int|string $planId, ?int $quantity = null): self
@@ -130,14 +145,18 @@ class Subscription extends Model
             $payload['quantity'] = $quantity;
         }
 
-        $data = Cashier::client()->subscriptions()->update($this->bluesnap_id, $payload)->json();
+        return $this->serialized(function () use ($payload, $planId, $quantity): self {
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->subscriptions()->update($this->bluesnap_id, $payload),
+            );
 
-        $this->forceFill([
-            'plan_id' => (string) $planId,
-            'quantity' => $quantity ?? $this->quantity,
-        ]);
+            $this->forceFill([
+                'plan_id' => (string) $planId,
+                'quantity' => $quantity ?? $this->quantity,
+            ]);
 
-        return $this->syncFromBlueSnap($data);
+            return $this->persistBlueSnapState($response->json());
+        });
     }
 
     /** @return array<mixed> */
@@ -150,66 +169,90 @@ class Subscription extends Model
             $changes['quantity'] = $quantity;
         }
 
-        return Cashier::client()->subscriptions()->switchChargeAmount($this->bluesnap_id, $changes)->json();
+        return BlueSnapOperation::run(
+            fn () => Cashier::client()->subscriptions()->switchChargeAmount($this->bluesnap_id, $changes),
+        )->json();
     }
 
     public function updateQuantity(int $quantity): self
     {
         $this->assertValidQuantity($quantity);
 
-        $data = Cashier::client()->subscriptions()->update($this->bluesnap_id, [
-            'planId' => $this->plan_id,
-            'quantity' => $quantity,
-        ])->json();
-
-        $this->quantity = $quantity;
-
-        return $this->syncFromBlueSnap($data);
+        return $this->serialized(fn (): self => $this->persistQuantity($quantity));
     }
 
     public function incrementQuantity(int $count = 1): self
     {
-        return $this->updateQuantity($this->quantity + $count);
+        $this->assertValidCount($count);
+
+        return $this->serialized(
+            fn (): self => $this->persistQuantity($this->quantity + $count),
+        );
     }
 
     public function decrementQuantity(int $count = 1): self
     {
-        return $this->updateQuantity($this->quantity - $count);
+        $this->assertValidCount($count);
+
+        return $this->serialized(function () use ($count): self {
+            $quantity = $this->quantity - $count;
+            $this->assertValidQuantity($quantity);
+
+            return $this->persistQuantity($quantity);
+        });
     }
 
     public function cancel(): self
     {
-        $data = Cashier::client()->subscriptions()->cancelAtPeriodEnd($this->bluesnap_id)->json();
+        return $this->serialized(function (): self {
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->subscriptions()->cancelAtPeriodEnd($this->bluesnap_id),
+            );
 
-        $this->auto_renew = false;
-        $this->ends_at = $this->next_charge_at;
+            $this->auto_renew = false;
+            $this->ends_at = $this->next_charge_at;
 
-        return $this->syncFromBlueSnap($data);
+            return $this->persistBlueSnapState($response->json());
+        });
     }
 
     public function cancelNow(): self
     {
-        $data = Cashier::client()->subscriptions()->cancel($this->bluesnap_id)->json();
+        return $this->serialized(function (): self {
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->subscriptions()->cancel($this->bluesnap_id),
+            );
 
-        $this->status = self::STATUS_CANCELED;
-        $this->auto_renew = false;
-        $this->ends_at = Carbon::now();
+            $this->status = self::STATUS_CANCELED;
+            $this->auto_renew = false;
+            $this->ends_at = Carbon::now();
 
-        return $this->syncFromBlueSnap($data);
+            return $this->persistBlueSnapState($response->json());
+        });
     }
 
     public function resume(): self
     {
-        $data = Cashier::client()->subscriptions()->renew($this->bluesnap_id)->json();
+        return $this->serialized(function (): self {
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->subscriptions()->renew($this->bluesnap_id),
+            );
 
-        $this->auto_renew = true;
-        $this->ends_at = null;
+            $this->auto_renew = true;
+            $this->ends_at = null;
 
-        return $this->syncFromBlueSnap($data);
+            return $this->persistBlueSnapState($response->json());
+        });
     }
 
     /** @param array<mixed> $data */
     public function syncFromBlueSnap(array $data): self
+    {
+        return $this->serialized(fn (): self => $this->persistBlueSnapState($data));
+    }
+
+    /** @param array<mixed> $data */
+    private function persistBlueSnapState(array $data): self
     {
         $attributes = [
             'raw_response' => $data,
@@ -231,10 +274,10 @@ class Subscription extends Model
             $attributes['quantity'] = (int) $data['quantity'];
         }
 
-        if (is_int($data['recurringChargeAmount'] ?? null)
-            || is_float($data['recurringChargeAmount'] ?? null)
-            || is_string($data['recurringChargeAmount'] ?? null)) {
-            $attributes['recurring_amount'] = (string) $data['recurringChargeAmount'];
+        $recurringAmount = Money::normalizeApiAmount($data['recurringChargeAmount'] ?? null);
+
+        if ($recurringAmount !== null) {
+            $attributes['recurring_amount'] = $recurringAmount;
         }
 
         if (is_bool($data['autoRenew'] ?? null)) {
@@ -269,7 +312,45 @@ class Subscription extends Model
     private function assertValidQuantity(int $quantity): void
     {
         if ($quantity < 1) {
-            throw new InvalidArgumentException('Subscription quantity must be at least 1.');
+            throw InvalidBillingPayload::because('Subscription quantity must be at least 1.');
         }
+    }
+
+    private function assertValidCount(int $count): void
+    {
+        if ($count < 1) {
+            throw InvalidBillingPayload::because('The quantity adjustment count must be at least 1.');
+        }
+    }
+
+    private function persistQuantity(int $quantity): self
+    {
+        $response = BlueSnapOperation::run(
+            fn () => Cashier::client()->subscriptions()->update($this->bluesnap_id, [
+                'planId' => $this->plan_id,
+                'quantity' => $quantity,
+            ]),
+        );
+
+        $this->quantity = $quantity;
+
+        return $this->persistBlueSnapState($response->json());
+    }
+
+    /**
+     * @param callable(): self $operation
+     */
+    private function serialized(callable $operation): self
+    {
+        return $this->getConnection()->transaction(function () use ($operation): self {
+            $this->newQuery()
+                ->whereKey($this->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->refresh();
+
+            return $operation();
+        });
     }
 }

@@ -78,13 +78,32 @@ $subscription = $user->newSubscription('default', planId: 2283849)
 Or allow BlueSnap to create the vaulted shopper as part of the subscription request:
 
 ```php
+use Andriichuk\CashierBlueSnap\ValueObjects\PaymentSource;
+
 $subscription = $user->newSubscription('default', planId: 2283849)
-    ->create([
-        'paymentSource' => ['pfToken' => $request->string('pf_token')->toString()],
-    ], idempotencyKey: (string) Str::uuid());
+    ->paymentSource(PaymentSource::hostedFields(
+        $request->string('pf_token')->toString(),
+    ))
+    ->create(idempotencyKey: (string) Str::uuid());
 ```
 
-The builder also supports `nextChargeDate()`, `recurringAmount()`, and `withPayload()` for BlueSnap-specific fields.
+For a non-tokenized card, wallet, or alternative payment method, use `PaymentSource::fromArray()` with BlueSnap's documented `paymentSource` object. Hosted Payment Fields tokens are intentionally emitted as a top-level `pfToken`, as required by BlueSnap's Create Subscription API.
+
+The builder also supports `nextChargeDate()`, `recurringAmount()`, and `withPayload()` for BlueSnap-specific fields. Prefer decimal strings for monetary values:
+
+```php
+use Andriichuk\CashierBlueSnap\ValueObjects\Money;
+use Andriichuk\CashierBlueSnap\ValueObjects\PayerInfo;
+use Andriichuk\CashierBlueSnap\ValueObjects\PaymentSource;
+
+$subscription = $user->newSubscription('default', 2283849)
+    ->payer(new PayerInfo('Ada', 'Lovelace', 'ada@example.com'))
+    ->paymentSource(PaymentSource::hostedFields($pfToken))
+    ->recurringAmount(Money::of('29.99', 'USD'))
+    ->create(idempotencyKey: (string) Str::uuid());
+```
+
+The array accepted by `create()` remains available as an escape hatch for new BlueSnap fields, but it is validated for conflicting or malformed payment and payer data.
 
 ## Subscription lifecycle
 
@@ -121,6 +140,9 @@ Implemented now:
 - Subscription creation and local response synchronization
 - Retrieval, plan swap, switch-charge preview, quantity changes, period-end cancellation, immediate cancellation, and renewal
 - Custom model configuration and raw BlueSnap payload access
+- Typed money, payer, and payment-source values with request validation
+- Atomic local persistence and serialized customer/subscription mutations
+- Explicit declined-payment and retryable-operation exceptions
 - Laravel 13 integration tests and maximum-level static analysis
 
 Planned next:

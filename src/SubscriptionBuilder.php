@@ -4,13 +4,23 @@ declare(strict_types=1);
 
 namespace Andriichuk\CashierBlueSnap;
 
+use Andriichuk\CashierBlueSnap\Exceptions\InvalidBillingPayload;
 use Andriichuk\CashierBlueSnap\Exceptions\IncompleteBlueSnapResponse;
+use Andriichuk\CashierBlueSnap\Exceptions\SubscriptionAlreadyCreated;
+use Andriichuk\CashierBlueSnap\Support\BlueSnapOperation;
+use Andriichuk\CashierBlueSnap\Support\SubscriptionPayloadValidator;
+use Andriichuk\CashierBlueSnap\ValueObjects\Money;
+use Andriichuk\CashierBlueSnap\ValueObjects\PayerInfo;
+use Andriichuk\CashierBlueSnap\ValueObjects\PaymentSource;
 use Illuminate\Database\Eloquent\Model;
-use InvalidArgumentException;
 
 final class SubscriptionBuilder
 {
     private int $quantity = 1;
+
+    private ?PayerInfo $payer = null;
+
+    private ?PaymentSource $paymentSource = null;
 
     /** @var array<string, mixed> */
     private array $payload = [];
@@ -22,12 +32,23 @@ final class SubscriptionBuilder
         private readonly string $customerName,
         private readonly ?string $customerEmail,
     ) {
+        if (trim($this->type) === '') {
+            throw InvalidBillingPayload::because('The subscription type cannot be empty.');
+        }
+
+        if (trim($this->planId) === '') {
+            throw InvalidBillingPayload::because('The BlueSnap plan ID cannot be empty.');
+        }
+
+        if (! $this->billable->exists) {
+            throw InvalidBillingPayload::because('The billable model must be persisted before subscribing.');
+        }
     }
 
     public function quantity(int $quantity): self
     {
         if ($quantity < 1) {
-            throw new InvalidArgumentException('Subscription quantity must be at least 1.');
+            throw InvalidBillingPayload::because('Subscription quantity must be at least 1.');
         }
 
         $this->quantity = $quantity;
@@ -38,7 +59,7 @@ final class SubscriptionBuilder
     public function trialDays(int $days): self
     {
         if ($days < 0) {
-            throw new InvalidArgumentException('Trial days cannot be negative.');
+            throw InvalidBillingPayload::because('Trial days cannot be negative.');
         }
 
         $this->payload['overrideTrialPeriodDays'] = $days;
@@ -53,9 +74,25 @@ final class SubscriptionBuilder
         return $this;
     }
 
-    public function recurringAmount(int|float|string $amount): self
+    public function recurringAmount(Money|int|string $amount): self
     {
-        $this->payload['overrideRecurringChargeAmount'] = $amount;
+        $this->payload['overrideRecurringChargeAmount'] = $amount instanceof Money
+            ? $amount->amount
+            : Money::normalizeAmount($amount);
+
+        return $this;
+    }
+
+    public function payer(PayerInfo $payer): self
+    {
+        $this->payer = $payer;
+
+        return $this;
+    }
+
+    public function paymentSource(PaymentSource $paymentSource): self
+    {
+        $this->paymentSource = $paymentSource;
 
         return $this;
     }
@@ -69,65 +106,107 @@ final class SubscriptionBuilder
     }
 
     /**
-     * @param array<string, mixed> $payment
+     * The array form is retained as a BlueSnap escape hatch. Prefer PaymentSource.
+     *
+     * @param array<string, mixed>|PaymentSource|null $payment
      */
-    public function create(array $payment = [], ?string $idempotencyKey = null): Subscription
+    public function create(
+        array|PaymentSource|null $payment = null,
+        ?string $idempotencyKey = null,
+    ): Subscription {
+        $connection = $this->billable->getConnection();
+
+        return $connection->transaction(function () use ($payment, $idempotencyKey): Subscription {
+            $this->billable->newQuery()
+                ->whereKey($this->billable->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $subscriptions = $this->billable->morphMany(Cashier::$subscriptionModel, 'billable');
+
+            if ($subscriptions->where('type', $this->type)->exists()) {
+                throw SubscriptionAlreadyCreated::forType($this->type);
+            }
+
+            $payload = $this->buildPayload($payment);
+            $customer = $this->billable->morphOne(Cashier::$customerModel, 'billable')->first();
+
+            if ($customer instanceof Customer) {
+                $payload['vaultedShopperId'] = $customer->vaulted_shopper_id;
+            } elseif (! isset($payload['payerInfo'])) {
+                $payload['payerInfo'] = $this->defaultPayerInfo()->toArray();
+            }
+
+            SubscriptionPayloadValidator::validate($payload, $customer instanceof Customer);
+
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->subscriptions()->create($payload, $idempotencyKey),
+            );
+            $data = $response->json();
+
+            BlueSnapOperation::ensurePaymentSucceeded($data);
+
+            $subscriptionId = $data['subscriptionId'] ?? null;
+
+            if (! is_int($subscriptionId) && ! is_string($subscriptionId)) {
+                throw IncompleteBlueSnapResponse::missing('subscriptionId');
+            }
+
+            if (! $customer instanceof Customer) {
+                $this->storeCustomerFromSubscription($data);
+            }
+
+            $status = is_string($data['status'] ?? null)
+                ? $data['status']
+                : Subscription::STATUS_ACTIVE;
+            $autoRenew = is_bool($data['autoRenew'] ?? null) ? $data['autoRenew'] : true;
+
+            /** @var Subscription $subscription */
+            $subscription = $subscriptions->create([
+                'type' => $this->type,
+                'bluesnap_id' => (string) $subscriptionId,
+                'plan_id' => $this->planId,
+                'status' => $status,
+                'quantity' => $this->quantity,
+                'auto_renew' => $autoRenew,
+            ]);
+
+            return $subscription->syncFromBlueSnap($data);
+        });
+    }
+
+    /**
+     * @param array<string, mixed>|PaymentSource|null $payment
+     * @return array<string, mixed>
+     */
+    private function buildPayload(array|PaymentSource|null $payment): array
     {
-        $payload = array_replace($this->payload, $payment, [
+        $paymentPayload = match (true) {
+            $payment instanceof PaymentSource => $payment->toSubscriptionPayload(),
+            is_array($payment) => $payment,
+            $this->paymentSource instanceof PaymentSource => $this->paymentSource->toSubscriptionPayload(),
+            default => [],
+        };
+
+        $payload = array_replace($this->payload, $paymentPayload, [
             'planId' => $this->planId,
             'quantity' => $this->quantity,
         ]);
 
-        $customer = $this->billable->morphOne(Cashier::$customerModel, 'billable')->first();
-
-        if ($customer instanceof Customer) {
-            $payload['vaultedShopperId'] = $customer->vaulted_shopper_id;
-        } elseif (! isset($payload['payerInfo'])) {
-            $payload['payerInfo'] = $this->defaultPayerInfo();
+        if ($this->payer instanceof PayerInfo) {
+            $payload['payerInfo'] = $this->payer->toArray();
         }
 
-        $response = Cashier::client()->subscriptions()->create($payload, $idempotencyKey);
-        $data = $response->json();
-        $subscriptionId = $data['subscriptionId'] ?? null;
-
-        if (! is_int($subscriptionId) && ! is_string($subscriptionId)) {
-            throw IncompleteBlueSnapResponse::missing('subscriptionId');
-        }
-
-        if (! $customer instanceof Customer) {
-            $customer = $this->storeCustomerFromSubscription($data);
-        }
-
-        $status = is_string($data['status'] ?? null)
-            ? $data['status']
-            : Subscription::STATUS_ACTIVE;
-        $autoRenew = is_bool($data['autoRenew'] ?? null) ? $data['autoRenew'] : true;
-
-        /** @var Subscription $subscription */
-        $subscription = $this->billable->morphMany(Cashier::$subscriptionModel, 'billable')->create([
-            'type' => $this->type,
-            'bluesnap_id' => (string) $subscriptionId,
-            'plan_id' => $this->planId,
-            'status' => $status,
-            'quantity' => $this->quantity,
-            'auto_renew' => $autoRenew,
-        ]);
-
-        return $subscription->syncFromBlueSnap($data);
+        return $payload;
     }
 
-    /** @return array<string, scalar|null> */
-    private function defaultPayerInfo(): array
+    private function defaultPayerInfo(): PayerInfo
     {
-        $name = trim($this->customerName);
-        [$firstName, $lastName] = array_pad(preg_split('/\s+/', $name, 2) ?: [], 2, '');
-
-        return array_filter([
-            'firstName' => $firstName,
-            'lastName' => $lastName,
-            'email' => $this->customerEmail,
-            'merchantShopperId' => $this->merchantShopperId(),
-        ], static fn (mixed $value): bool => $value !== null && $value !== '');
+        return PayerInfo::fromFullName(
+            $this->customerName,
+            $this->customerEmail,
+            $this->merchantShopperId(),
+        );
     }
 
     /** @param array<mixed> $data */

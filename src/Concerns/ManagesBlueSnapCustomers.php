@@ -7,7 +7,9 @@ namespace Andriichuk\CashierBlueSnap\Concerns;
 use Andriichuk\CashierBlueSnap\Cashier;
 use Andriichuk\CashierBlueSnap\Customer;
 use Andriichuk\CashierBlueSnap\Exceptions\CustomerAlreadyCreated;
+use Andriichuk\CashierBlueSnap\Exceptions\InvalidBillingPayload;
 use Andriichuk\CashierBlueSnap\Exceptions\IncompleteBlueSnapResponse;
+use Andriichuk\CashierBlueSnap\Support\BlueSnapOperation;
 use Illuminate\Database\Eloquent\Relations\MorphOne;
 
 /** @mixin \Illuminate\Database\Eloquent\Model */
@@ -29,54 +31,85 @@ trait ManagesBlueSnapCustomers
         array $options = [],
         ?string $idempotencyKey = null,
     ): Customer {
-        if ($this->hasBlueSnapCustomer()) {
-            throw CustomerAlreadyCreated::forBillable($this);
+        if (! $this->exists) {
+            throw InvalidBillingPayload::because('The billable model must be persisted before creating a customer.');
         }
 
-        $payload = array_replace($this->defaultBlueSnapCustomerPayload(), $options);
-        $response = Cashier::client()->vaultedShoppers()->create($payload, $idempotencyKey);
-        $data = $response->json();
-        $vaultedShopperId = $data['vaultedShopperId'] ?? $this->idFromLocation($response->location());
+        return $this->getConnection()->transaction(function () use ($options, $idempotencyKey): Customer {
+            $this->newQuery()
+                ->whereKey($this->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        if (! is_int($vaultedShopperId) && ! is_string($vaultedShopperId)) {
-            throw IncompleteBlueSnapResponse::missing('vaultedShopperId');
-        }
+            if ($this->hasBlueSnapCustomer()) {
+                throw CustomerAlreadyCreated::forBillable($this);
+            }
 
-        /** @var Customer $customer */
-        $customer = $this->blueSnapCustomer()->create([
-            'vaulted_shopper_id' => (string) $vaultedShopperId,
-            'name' => $this->blueSnapName(),
-            'email' => $this->blueSnapEmail(),
-            'raw_response' => $data,
-        ]);
+            $payload = array_replace($this->defaultBlueSnapCustomerPayload(), $options);
+            $this->validateBlueSnapCustomerPayload($payload);
 
-        return $customer;
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->vaultedShoppers()->create($payload, $idempotencyKey),
+            );
+            $data = $response->json();
+            $vaultedShopperId = $data['vaultedShopperId'] ?? $this->idFromLocation($response->location());
+
+            if (! is_int($vaultedShopperId) && ! is_string($vaultedShopperId)) {
+                throw IncompleteBlueSnapResponse::missing('vaultedShopperId');
+            }
+
+            /** @var Customer $customer */
+            $customer = $this->blueSnapCustomer()->create([
+                'vaulted_shopper_id' => (string) $vaultedShopperId,
+                'name' => $this->blueSnapName(),
+                'email' => $this->blueSnapEmail(),
+                'raw_response' => $data,
+            ]);
+
+            return $customer;
+        });
     }
 
     /** @param array<string, mixed> $options */
     public function updateBlueSnapCustomer(array $options): Customer
     {
         $customer = $this->blueSnapCustomer()->firstOrFail();
-        $response = Cashier::client()->vaultedShoppers()->update($customer->vaulted_shopper_id, $options);
-        $data = $response->json();
+        $this->validateBlueSnapCustomerPayload($options);
 
-        $customer->forceFill([
-            'name' => $this->blueSnapName(),
-            'email' => $this->blueSnapEmail(),
-            'raw_response' => $data,
-        ])->save();
+        return $customer->getConnection()->transaction(function () use ($customer, $options): Customer {
+            $customer->newQuery()->whereKey($customer->getKey())->lockForUpdate()->firstOrFail();
+            $customer->refresh();
 
-        $customer->refresh();
+            $response = BlueSnapOperation::run(
+                fn () => Cashier::client()->vaultedShoppers()->update($customer->vaulted_shopper_id, $options),
+            );
+            $data = $response->json();
 
-        return $customer;
+            $customer->forceFill([
+                'name' => $this->blueSnapName(),
+                'email' => $this->blueSnapEmail(),
+                'raw_response' => $data,
+            ])->save();
+
+            $customer->refresh();
+
+            return $customer;
+        });
     }
 
     public function deleteBlueSnapCustomer(): void
     {
         $customer = $this->blueSnapCustomer()->firstOrFail();
 
-        Cashier::client()->vaultedShoppers()->delete($customer->vaulted_shopper_id);
-        $customer->delete();
+        $customer->getConnection()->transaction(function () use ($customer): void {
+            $customer->newQuery()->whereKey($customer->getKey())->lockForUpdate()->firstOrFail();
+            $customer->refresh();
+
+            BlueSnapOperation::run(
+                fn () => Cashier::client()->vaultedShoppers()->delete($customer->vaulted_shopper_id),
+            );
+            $customer->delete();
+        });
     }
 
     public function blueSnapName(): string
@@ -129,5 +162,18 @@ trait ManagesBlueSnapCustomers
         $id = basename(rtrim($path, '/'));
 
         return $id !== '' ? $id : null;
+    }
+
+    /** @param array<string, mixed> $payload */
+    private function validateBlueSnapCustomerPayload(array $payload): void
+    {
+        if (isset($payload['pfToken']) && (! is_string($payload['pfToken']) || trim($payload['pfToken']) === '')) {
+            throw InvalidBillingPayload::because('The Hosted Payment Fields token must be a non-empty string.');
+        }
+
+        if (isset($payload['email'])
+            && (! is_string($payload['email']) || filter_var($payload['email'], FILTER_VALIDATE_EMAIL) === false)) {
+            throw InvalidBillingPayload::because('The BlueSnap customer email address is invalid.');
+        }
     }
 }
